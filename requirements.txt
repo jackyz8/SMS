@@ -1,0 +1,11 @@
+requests
+httpx
+user_agent
+cfonts
+requests
+httpx
+user_agent
+cfonts
+psutil
+python-telegram-bot
+cryptography
