@@ -1237,11 +1237,7 @@ class ProcessManager:
                 return False, "No startup file selected. Open Settings -> Startup file."
             # Security boundary: never run non-admin uploads directly on the manager host.
             # ALLOW_UNSANDBOXED_USERS is intentionally not used to bypass this restriction.
-            if (
-    not SANDBOX.docker
-    and not is_admin(p["owner_id"])
-    and not CFG.allow_unsandboxed_users
-):
+            if not SANDBOX.docker and not is_admin(p["owner_id"]):
                 return False, ("This host is in unsandboxed process mode, so only the owner/admin "
                                "may run projects. To let regular users run projects, deploy with a "
                                "working Docker daemon and SANDBOX_MODE=docker.")
@@ -1826,10 +1822,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     parts = (q.data or "").split(":")
     fn = ROUTES.get(parts[0])
+
     try:
-    await query.answer()
-except Exception:
-    pass
+        await q.answer()
+    except Exception:
+        pass
+
     if not fn:
         return
     await fn(update, context, user, parts[1:])
@@ -4722,20 +4720,34 @@ async def post_init(app: Application) -> None:
             lost += 1
     log.info("Recovery: %d project(s) still running, %d exited while manager was down", adopted, lost)
     if SANDBOX.docker:
-        asyncio.create_task(prepare_docker_image())
+        # Wait for the configured image check/pull to finish before accepting project actions.
+        # This avoids a project start racing the initial image pull.
+        await prepare_docker_image()
     app.bot_data["monitor"] = asyncio.create_task(monitor_loop(app))
     spawn(resume_projects(app))  # bring back everything that was running before
     me = await app.bot.get_me()
     log.info("Bot @%s started (sandbox=%s, data=%s)", me.username, SANDBOX.mode, CFG.data_dir)
 
 
-async def prepare_docker_image() -> None:
-    rc, _ = await run_exec([CFG.docker_bin, "image", "inspect", CFG.docker_image], timeout=30)
+async def prepare_docker_image() -> bool:
+    """Ensure the default project image is available before project actions begin."""
+    rc, out = await run_exec(
+        [CFG.docker_bin, "image", "inspect", CFG.docker_image], timeout=30
+    )
+    if rc == 0:
+        log.info("Docker image %s is ready", CFG.docker_image)
+        return True
+
+    log.info("Pulling Docker image %s …", CFG.docker_image)
+    rc, out = await run_exec(
+        [CFG.docker_bin, "pull", CFG.docker_image], timeout=900
+    )
     if rc != 0:
-        log.info("Pulling Docker image %s …", CFG.docker_image)
-        rc, out = await run_exec([CFG.docker_bin, "pull", CFG.docker_image], timeout=900)
-        if rc != 0:
-            log.error("docker pull failed: %s", out[-300:])
+        log.error("Docker image pull failed (exit %s): %s", rc, out[-1000:])
+        return False
+
+    log.info("Docker image %s pulled successfully", CFG.docker_image)
+    return True
 
 
 async def post_shutdown(app: Application) -> None:
